@@ -40,6 +40,14 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.debug
+
+            // R8 code shrinking strips the generic type signatures that Gson
+            // relies on inside flutter_local_notifications, which crashes
+            // scheduling at runtime with "Missing type parameter." Disabling
+            // shrinking/obfuscation keeps reflection-based libraries working.
+            // The size cost is negligible for this app.
+            minifyEnabled false
+            shrinkResources false
         }
     }
 }

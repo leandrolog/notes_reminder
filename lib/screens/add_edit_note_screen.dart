@@ -1,9 +1,12 @@
-﻿import 'package:flutter/material.dart';
+﻿import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+import 'package:sqflite/sqflite.dart';
 
 import '../models/note_model.dart';
 import '../providers/note_provider.dart';
+import '../services/notification_service.dart';
 import '../widgets/custom_textfield.dart';
 
 class AddEditNoteScreen extends StatefulWidget {
@@ -104,22 +107,93 @@ class _AddEditNoteScreenState extends State<AddEditNoteScreen> {
       );
 
       final provider = context.read<NoteProvider>();
-      if (_isEditing) {
-        await provider.updateNote(note);
-      } else {
-        await provider.addNote(note);
-      }
+      final reminderStatus = _isEditing
+          ? await provider.updateNote(note)
+          : await provider.addNote(note);
 
       if (!mounted) return;
+
+      // The ScaffoldMessenger lives above this route, so the message keeps
+      // showing on the Home screen after we pop back.
+      final messenger = ScaffoldMessenger.of(context);
+      final errorColor = Theme.of(context).colorScheme.error;
       Navigator.of(context).pop();
-    } catch (_) {
+
+      _showReminderSnackBar(messenger, reminderStatus, errorColor);
+    } on DatabaseException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Erro ao salvar nota. Tente novamente.')),
+      _showError(
+        'Nao foi possivel salvar a nota no banco de dados.${kDebugMode ? '\n($e)' : ''}',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      _showError(
+        'Erro inesperado ao salvar a nota. Tente novamente.${kDebugMode ? '\n($e)' : ''}',
       );
     } finally {
       if (mounted) setState(() => _isSaving = false);
     }
+  }
+
+  /// Shows the post-save feedback. When the reminder could only be scheduled
+  /// inexactly (or not at all) because of the exact-alarm permission, the
+  /// SnackBar offers a "Permitir" action that opens the system "Alarms &
+  /// reminders" screen.
+  void _showReminderSnackBar(
+    ScaffoldMessengerState messenger,
+    ReminderStatus status,
+    Color errorColor,
+  ) {
+    final baseMessage =
+        _isEditing ? 'Nota atualizada com sucesso.' : 'Nota criada com sucesso.';
+    final when = _selectedReminder == null
+        ? ''
+        : DateFormat('dd/MM/yyyy HH:mm').format(_selectedReminder!);
+
+    final (String message, bool needsExactAlarm) = switch (status) {
+      ReminderStatus.scheduled => ('$baseMessage Lembrete agendado para $when.', false),
+      ReminderStatus.scheduledInexact => (
+          '$baseMessage Lembrete agendado para $when, mas pode atrasar alguns '
+              'minutos. Ative "Alarmes e lembretes" para o horario exato.',
+          true,
+        ),
+      ReminderStatus.failed => (
+          '$baseMessage Porem o lembrete nao pode ser agendado. Ative a '
+              'permissao de alarmes/notificacoes do aplicativo.'
+              '\n[diag] ${NotificationService.instance.lastScheduleError ?? "sem detalhe"}',
+          true,
+        ),
+      ReminderStatus.none => (baseMessage, false),
+    };
+
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: status == ReminderStatus.failed ? errorColor : null,
+        duration: needsExactAlarm
+            ? const Duration(seconds: 8)
+            : const Duration(seconds: 4),
+        action: needsExactAlarm
+            ? SnackBarAction(
+                label: 'Permitir',
+                onPressed: () {
+                  // Opens the system settings screen; safe even if the user
+                  // backs out without granting.
+                  NotificationService.instance.openExactAlarmsSettings();
+                },
+              )
+            : null,
+      ),
+    );
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Theme.of(context).colorScheme.error,
+      ),
+    );
   }
 
   Future<void> _delete() async {
@@ -149,15 +223,14 @@ class _AddEditNoteScreenState extends State<AddEditNoteScreen> {
     try {
       await context.read<NoteProvider>().deleteNote(widget.note!);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Nota excluida.')),
-      );
+      final messenger = ScaffoldMessenger.of(context);
       Navigator.of(context).pop();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Nota excluida com sucesso.')),
+      );
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Erro ao excluir nota. Tente novamente.')),
-      );
+      _showError('Nao foi possivel excluir a nota. Tente novamente.');
     } finally {
       if (mounted) setState(() => _isSaving = false);
     }

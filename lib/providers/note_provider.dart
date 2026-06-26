@@ -1,10 +1,26 @@
-﻿import 'dart:async';
-
-import 'package:flutter/foundation.dart';
+﻿import 'package:flutter/foundation.dart';
 
 import '../database/database_helper.dart';
 import '../models/note_model.dart';
 import '../services/notification_service.dart';
+
+/// Outcome of scheduling a reminder while saving a note.
+enum ReminderStatus {
+  /// The note had no reminder, so nothing was scheduled.
+  none,
+
+  /// The reminder was scheduled as an exact alarm.
+  scheduled,
+
+  /// The reminder was scheduled, but only as an inexact alarm because the OS
+  /// blocks exact alarms. It still fires, but may be delayed a few minutes —
+  /// the UI can offer to enable the exact-alarm permission.
+  scheduledInexact,
+
+  /// The note was saved, but the reminder could not be scheduled
+  /// (for example, the OS denied the alarm/notification permission).
+  failed,
+}
 
 class NoteProvider extends ChangeNotifier {
   final DatabaseHelper _databaseHelper;
@@ -30,54 +46,40 @@ class NoteProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> addNote(Note note) async {
-    try {
-      final inserted = await _databaseHelper.insertNote(note);
-      _notes = _sortNotes([..._notes, inserted]);
-      notifyListeners();
+  /// Inserts a new note. The database write is awaited (a failure here is a real
+  /// save error and is rethrown), while the reminder scheduling can only affect
+  /// the returned [ReminderStatus] — it never breaks the save.
+  Future<ReminderStatus> addNote(Note note) async {
+    final inserted = await _databaseHelper.insertNote(note);
+    _notes = _sortNotes([..._notes, inserted]);
+    notifyListeners();
 
-      if (inserted.id != null && inserted.reminderDate != null) {
-        unawaited(_scheduleReminder(inserted));
-      }
-    } catch (_) {
-      rethrow;
-    }
+    return _syncReminder(inserted);
   }
 
-  Future<void> updateNote(Note note) async {
-    try {
-      if (note.id == null) return;
+  /// Updates an existing note and re-syncs its reminder.
+  Future<ReminderStatus> updateNote(Note note) async {
+    if (note.id == null) return ReminderStatus.none;
 
-      await _databaseHelper.updateNote(note);
+    await _databaseHelper.updateNote(note);
 
-      final index = _notes.indexWhere((n) => n.id == note.id);
-      if (index >= 0) {
-        _notes[index] = note;
-      }
-      _notes = _sortNotes(_notes);
-      notifyListeners();
-
-      unawaited(_rescheduleReminder(note));
-    } catch (_) {
-      rethrow;
+    final index = _notes.indexWhere((n) => n.id == note.id);
+    if (index >= 0) {
+      _notes[index] = note;
     }
+    _notes = _sortNotes(_notes);
+    notifyListeners();
+
+    return _syncReminder(note);
   }
 
   Future<void> deleteNote(Note note) async {
-    try {
-      if (note.id == null) return;
+    if (note.id == null) return;
 
-      await _databaseHelper.deleteNote(note.id!);
-      unawaited(
-        _ignoreNotificationErrors(
-          () => NotificationService.instance.cancelNotification(note.id!),
-        ),
-      );
-      _notes.removeWhere((n) => n.id == note.id);
-      notifyListeners();
-    } catch (_) {
-      rethrow;
-    }
+    await _databaseHelper.deleteNote(note.id!);
+    await NotificationService.instance.cancelNotification(note.id!);
+    _notes.removeWhere((n) => n.id == note.id);
+    notifyListeners();
   }
 
   Future<void> searchNotes(String query) async {
@@ -117,36 +119,29 @@ class NoteProvider extends ChangeNotifier {
     return sorted;
   }
 
-  Future<void> _rescheduleReminder(Note note) async {
-    if (note.id == null) return;
+  /// Cancels any previously scheduled reminder for the note and schedules a new
+  /// one when a reminder date is set. Always safe to call: notification errors
+  /// are turned into a [ReminderStatus.failed] instead of being thrown, so the
+  /// note stays saved even if the OS blocks scheduling.
+  Future<ReminderStatus> _syncReminder(Note note) async {
+    if (note.id == null) return ReminderStatus.none;
 
-    await _ignoreNotificationErrors(
-      () => NotificationService.instance.cancelNotification(note.id!),
+    // Cancel the old reminder first so edits/removals don't fire stale alarms.
+    await NotificationService.instance.cancelNotification(note.id!);
+
+    if (note.reminderDate == null) return ReminderStatus.none;
+
+    final outcome = await NotificationService.instance.scheduleNotification(
+      id: note.id!,
+      title: 'Lembrete de Nota',
+      body: note.title.isEmpty ? '(Sem titulo)' : note.title,
+      scheduledDate: note.reminderDate!,
     );
 
-    if (note.reminderDate != null) {
-      await _scheduleReminder(note);
-    }
-  }
-
-  Future<void> _scheduleReminder(Note note) async {
-    if (note.id == null || note.reminderDate == null) return;
-
-    await _ignoreNotificationErrors(
-      () => NotificationService.instance.scheduleNotification(
-        id: note.id!,
-        title: 'Lembrete de Nota',
-        body: note.title.isEmpty ? '(Sem titulo)' : note.title,
-        scheduledDate: note.reminderDate!,
-      ),
-    );
-  }
-
-  Future<void> _ignoreNotificationErrors(Future<void> Function() action) async {
-    try {
-      await action();
-    } catch (_) {
-      // The note reminder remains saved even if Android blocks scheduling.
-    }
+    return switch (outcome) {
+      ScheduleOutcome.exact => ReminderStatus.scheduled,
+      ScheduleOutcome.inexact => ReminderStatus.scheduledInexact,
+      ScheduleOutcome.failed => ReminderStatus.failed,
+    };
   }
 }

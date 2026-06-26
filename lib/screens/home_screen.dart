@@ -48,11 +48,20 @@ class _HomeScreenState extends State<HomeScreen> {
     );
 
     if (confirm == true && context.mounted) {
-      await context.read<NoteProvider>().deleteNote(note);
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Nota excluida.')),
-      );
+      final messenger = ScaffoldMessenger.of(context);
+      try {
+        await context.read<NoteProvider>().deleteNote(note);
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Nota excluida com sucesso.')),
+        );
+      } catch (_) {
+        messenger.showSnackBar(
+          SnackBar(
+            content: const Text('Nao foi possivel excluir a nota. Tente novamente.'),
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+        );
+      }
     }
   }
 
